@@ -43,7 +43,7 @@ def run_train(device: torch.device, args: argparse.Namespace) -> None:
     print(f"[INFO] Generated {len(training_data)} training samples.")
 
     dataset = WordleDataset(training_data)
-    dataloader = DataLoader(dataset, batch_size=256, shuffle=True, num_workers=4, pin_memory=True)
+    dataloader = DataLoader(dataset, batch_size=1024, shuffle=True, num_workers=4, pin_memory=True)
 
     # Assuming input_size remains fixed
     input_size = 312

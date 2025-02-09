@@ -88,7 +88,7 @@ def demo_training() -> None:
     hidden_size = 1024
     num_hidden_layers = 3
     dropout = 0.3
-    batch_size = 64
+    batch_size = 256
     learning_rate = 1e-3
     num_epochs = 20
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
