@@ -1,157 +1,155 @@
-# src/main.py
+"""
+Main entry point for the Wordle Solver project.
+Handles training, gameplay, and testing modes.
+"""
 
 import argparse
 import os
+from copy import deepcopy
 
 import torch
-from data_loader import load_words, generate_training_data, WordleDataset, generate_word_files
-from model import HeuristicScoringModel
-from train import train_model
-from gameplay import play_wordle
 from torch.utils.data import DataLoader
-from config import FAST_MODE
-from torch.cuda import amp
 from tqdm import tqdm
-
-# Add plotting imports
 import matplotlib.pyplot as plt
 from collections import Counter
 
-def main():
-    scaler = amp.GradScaler()
+# Local module imports
+from data_loader import load_words, generate_training_data, WordleDataset, generate_word_files, get_feedback
+from model import HeuristicScoringModel
+from train import train_model, evaluate_model
+from gameplay import play_wordle
+from config import FAST_MODE
+
+
+# --- Configuration ---
+DATA_DIR = os.path.join("..", "data")
+ALLOWED_GUESSES_FILE = os.path.join(DATA_DIR, "allowed_guesses.txt")
+POSSIBLE_SOLUTIONS_FILE = os.path.join(DATA_DIR, "possible_solutions.txt")
+WORDS_FILE = os.path.join(DATA_DIR, "words.txt")
+MODEL_SAVE_PATH = "model.pth"
+
+
+# --- Mode-specific functions ---
+def run_train(device: torch.device, args: argparse.Namespace) -> None:
+    print("[INFO] Generating word files if necessary...")
+    generate_word_files(WORDS_FILE, ALLOWED_GUESSES_FILE, POSSIBLE_SOLUTIONS_FILE)
+
+    print("[INFO] Loading allowed guesses and possible solutions...")
+    allowed_guesses = load_words(ALLOWED_GUESSES_FILE)
+    possible_solutions = load_words(POSSIBLE_SOLUTIONS_FILE)
+
+    print("[INFO] Generating training data...")
+    training_data = generate_training_data(possible_solutions, allowed_guesses, num_games=10000)
+    print(f"[INFO] Generated {len(training_data)} training samples.")
+
+    dataset = WordleDataset(training_data)
+    dataloader = DataLoader(dataset, batch_size=256, shuffle=True, num_workers=4, pin_memory=True)
+
+    # Assuming input_size remains fixed
+    input_size = 312
+    model = HeuristicScoringModel(input_size).to(device)
+    criterion = torch.nn.MSELoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    scaler = torch.cuda.amp.GradScaler()
+
+    print("[INFO] Starting training...")
+    train_model(model, dataloader, criterion, optimizer, device, scaler, args.epochs)
+    torch.save(model.state_dict(), MODEL_SAVE_PATH)
+    print(f"[INFO] Training complete. Model saved at '{MODEL_SAVE_PATH}'.")
+
+
+def run_play(device: torch.device, args: argparse.Namespace) -> None:
+    # Validate game argument
+    if not args.game:
+        print("[ERROR] Please provide a target word using --game")
+        return
+
+    target_word = args.game.upper()
+    if len(target_word) != 5 or not target_word.isalpha():
+        print("[ERROR] Please provide a valid 5-letter target word.")
+        return
+
+    allowed_guesses = load_words(ALLOWED_GUESSES_FILE)
+    possible_solutions = load_words(POSSIBLE_SOLUTIONS_FILE)
+    if target_word not in possible_solutions:
+        print("[ERROR] Target word not in the possible solutions list.")
+        return
+
+    input_size = 312
+    model = HeuristicScoringModel(input_size).to(device)
+    try:
+        model.load_state_dict(torch.load(MODEL_SAVE_PATH, map_location=device))
+        model.eval()
+    except FileNotFoundError:
+        print(f"[ERROR] Model file '{MODEL_SAVE_PATH}' not found. Train the model first using --mode train.")
+        return
+
+    print(f"[INFO] Starting game with target: {target_word}")
+    attempts_taken = play_wordle(model, target_word, allowed_guesses, possible_solutions, device)
+    print(f"[INFO] Solved '{target_word}' in {attempts_taken} attempts.")
+
+
+def run_test(device: torch.device) -> None:
+    if not os.path.exists(MODEL_SAVE_PATH):
+        print(f"[ERROR] Model file '{MODEL_SAVE_PATH}' not found. Train the model first using --mode train.")
+        return
+
+    allowed_guesses = load_words(ALLOWED_GUESSES_FILE)
+    possible_solutions = load_words(POSSIBLE_SOLUTIONS_FILE)
+
+    input_size = 312
+    model = HeuristicScoringModel(input_size).to(device)
+    model.load_state_dict(torch.load(MODEL_SAVE_PATH, map_location=device))
+    model.eval()
+    print("[INFO] Loaded model for testing.")
+
+    total_attempts = 0
+    total_solved = 0
+    total_words = len(possible_solutions)
+    attempts_list = []
+
+    print("[INFO] Testing over all possible solutions...")
+    for target_word in tqdm(possible_solutions, desc="Testing Progress"):
+        attempts = play_wordle(model, target_word, allowed_guesses, possible_solutions, device, verbose=False)
+        # If solved in 6 attempts or less, record; else mark as failure (7)
+        if attempts <= 6:
+            total_solved += 1
+            total_attempts += attempts
+            attempts_list.append(attempts)
+        else:
+            total_attempts += 6
+            attempts_list.append(7)
+
+    average_guesses = total_attempts / total_words
+    accuracy = (total_solved / total_words) * 100
+
+    print("\n[RESULTS]")
+    print(f"Total Words Tested: {total_words}")
+    print(f"Words Solved: {total_solved}")
+    print(f"Accuracy: {accuracy:.2f}%")
+    print(f"Average Guesses: {average_guesses:.2f}")
+
+
+# --- Main Entry ---
+def main() -> None:
     parser = argparse.ArgumentParser(description="Wordle Solver using ML")
-    parser.add_argument('--mode', type=str, choices=['train', 'play', 'test'], default='train', help='Mode to run the script in.')
-    parser.add_argument('--epochs', type=int, default=200, help='Number of training epochs.')
-    parser.add_argument('--game', type=str, help='Target word for gameplay.')
+    parser.add_argument(
+        "--mode", type=str, choices=["train", "play", "test"], default="train",
+        help="Mode to run: train, play, or test."
+    )
+    parser.add_argument("--epochs", type=int, default=200, help="Number of training epochs.")
+    parser.add_argument("--game", type=str, help="Target word for gameplay (required for 'play' mode).")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[INFO] Using device: {device}")
 
-    print("[INFO] Ensuring word files are generated...")
-    generate_word_files('../data/words.txt', '../data/allowed_guesses.txt', '../data/possible_solutions.txt')
-
-    print("[INFO] Loading allowed guesses and possible solutions...")
-    allowed_guesses = load_words('../data/allowed_guesses.txt')
-    possible_solutions = load_words('../data/possible_solutions.txt')
-
-    input_size = 312
-
-    if args.mode == 'train':
-        print("[INFO] Generating training data...")
-        training_data = generate_training_data(possible_solutions, allowed_guesses, num_games=10000)
-        print(f"[INFO] Training data generated: {len(training_data)} samples")
-
-        dataset = WordleDataset(training_data)
-        dataloader = DataLoader(dataset, batch_size=256, shuffle=True, num_workers=4, pin_memory=True)
-
-        model = HeuristicScoringModel(input_size).to(device)
-        criterion = torch.nn.MSELoss()
-        optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-
-        print("[INFO] Starting training...")
-        train_model(model, dataloader, criterion, optimizer, device, scaler, args.epochs)
-
-        torch.save(model.state_dict(), 'model.pth')
-        print("[INFO] Training completed and model saved as 'model.pth'.")
-
-    elif args.mode == 'play':
-        if not args.game:
-            print("[ERROR] Please provide a target word using --game")
-            return
-        target_word = args.game.upper()
-        if len(target_word) != 5 or not target_word.isalpha():
-            print("[ERROR] Please provide a valid 5-letter target word.")
-            return
-        if target_word not in possible_solutions:
-            print("[ERROR] Target word not in the possible solutions list.")
-            return
-
-        model = HeuristicScoringModel(input_size).to(device)
-        try:
-            model.load_state_dict(torch.load('model.pth', map_location=device))
-            model.eval()
-        except FileNotFoundError:
-            print("[ERROR] Model file 'model.pth' not found. Please train the model first using --mode train.")
-            return
-
-        print(f"[INFO] Starting Wordle game with target: {target_word}")
-        attempts_taken = play_wordle(model, target_word, allowed_guesses, possible_solutions, device)
-        print(f"[INFO] Word '{target_word}' solved in {attempts_taken} attempts.")
-
-    elif args.mode == 'test':
-        if not os.path.exists('model.pth'):
-            print("[ERROR] Model file 'model.pth' not found. Please train the model first using --mode train.")
-            return
-
-        model = HeuristicScoringModel(input_size).to(device)
-        model.load_state_dict(torch.load('model.pth', map_location=device))
-        model.eval()
-        print("[INFO] Loaded trained model for testing.")
-
-        total_attempts = 0
-        total_solved = 0
-        total_words = len(possible_solutions)
-        attempts_list = []  # Store attempts for visualization
-
-        print("[INFO] Starting testing over all possible solutions...")
-        for target_word in tqdm(possible_solutions, desc="Testing Progress"):
-            attempts = play_wordle(model, target_word, allowed_guesses, possible_solutions, device, verbose=False)
-            # Record attempts (cap at 6 if not solved)
-            if attempts <= 6:
-                total_solved += 1
-                total_attempts += attempts
-                attempts_list.append(attempts)
-            else:
-                total_attempts += 6
-                attempts_list.append(7)  # Using '7' as a marker for "not solved within 6 tries"
-
-        average_guesses = total_attempts / total_words
-        accuracy = (total_solved / total_words) * 100
-
-        print("\n[RESULTS]")
-        print(f"Total Words Tested: {total_words}")
-        print(f"Words Solved: {total_solved}")
-        print(f"Accuracy: {accuracy:.2f}%")
-        print(f"Average Number of Guesses: {average_guesses:.2f}")
-
-        # -----------------------------
-        # Visualization
-        # -----------------------------
-        # 1. Histogram of attempts
-        #    - Here we separate solved vs unsolved. '7' attempts is our marker for unsolved.
-        solved_attempts = [a for a in attempts_list if a <= 6]
-        unsolved_count = len([a for a in attempts_list if a == 7])
-
-        plt.figure(figsize=(8, 6))
-        plt.hist(solved_attempts, bins=range(1, 8), align='left', color='skyblue', edgecolor='black')
-        plt.xticks(range(1, 8), ['1','2','3','4','5','6','Unsolved'])
-        # Add the unsolved count on the "7" bin:
-        # We'll manually place a text label instead, since '7' is our marker:
-        plt.bar(7, unsolved_count, color='salmon', edgecolor='black')
-        plt.xticks(range(1, 8), ['1','2','3','4','5','6','Failed'])
-        plt.title("Distribution of Attempts Taken to Solve")
-        plt.xlabel("Attempts")
-        plt.ylabel("Number of Words")
-        plt.savefig("attempt_distribution_histogram.png")
-        plt.close()
-
-        # 2. Bar chart of attempts frequency (excluding failed for clarity)
-        counter = Counter(solved_attempts)
-        attempts_order = [1,2,3,4,5,6]
-        freq = [counter[a] for a in attempts_order]
-        plt.figure(figsize=(8, 6))
-        plt.bar(attempts_order, freq, color='green', edgecolor='black')
-        plt.title("Frequency of Successful Attempts by Guess Count")
-        plt.xlabel("Attempts")
-        plt.ylabel("Number of Words Solved")
-        plt.xticks(attempts_order)
-        plt.savefig("successful_attempts_bar_chart.png")
-        plt.close()
-
-        print("[INFO] Visualization saved:")
-        print(" - attempt_distribution_histogram.png")
-        print(" - successful_attempts_bar_chart.png")
+    if args.mode == "train":
+        run_train(device, args)
+    elif args.mode == "play":
+        run_play(device, args)
+    elif args.mode == "test":
+        run_test(device)
 
 
 if __name__ == "__main__":
