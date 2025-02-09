@@ -1,6 +1,7 @@
 """
 Main entry point for the Wordle Solver project.
 Handles training, gameplay, and testing modes.
+Now using the embedding‐based model.
 """
 
 import argparse
@@ -15,7 +16,7 @@ from collections import Counter
 
 # Local module imports
 from data_loader import load_words, generate_training_data, WordleDataset, generate_word_files, get_feedback
-from model import HeuristicScoringModel
+from embedding_model import WordleEmbeddingModel
 from train import train_model, evaluate_model
 from gameplay import play_wordle
 from config import FAST_MODE
@@ -26,7 +27,7 @@ DATA_DIR = os.path.join("..", "data")
 ALLOWED_GUESSES_FILE = os.path.join(DATA_DIR, "allowed_guesses.txt")
 POSSIBLE_SOLUTIONS_FILE = os.path.join(DATA_DIR, "possible_solutions.txt")
 WORDS_FILE = os.path.join(DATA_DIR, "words.txt")
-MODEL_SAVE_PATH = "model.pth"
+MODEL_SAVE_PATH = "model.pth"  # You might rename this file if desired.
 
 
 # --- Mode-specific functions ---
@@ -45,9 +46,9 @@ def run_train(device: torch.device, args: argparse.Namespace) -> None:
     dataset = WordleDataset(training_data)
     dataloader = DataLoader(dataset, batch_size=1024, shuffle=True, num_workers=4, pin_memory=True)
 
-    # Assuming input_size remains fixed
-    input_size = 312
-    model = HeuristicScoringModel(input_size).to(device)
+    # Initialize the embedding-based model.
+    # Adjust letter_embedding_dim and mlp_hidden_dim as needed.
+    model = WordleEmbeddingModel(letter_embedding_dim=8, mlp_hidden_dim=256).to(device)
     criterion = torch.nn.MSELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
     scaler = torch.cuda.amp.GradScaler()
@@ -75,8 +76,7 @@ def run_play(device: torch.device, args: argparse.Namespace) -> None:
         print("[ERROR] Target word not in the possible solutions list.")
         return
 
-    input_size = 312
-    model = HeuristicScoringModel(input_size).to(device)
+    model = WordleEmbeddingModel(letter_embedding_dim=8, mlp_hidden_dim=256).to(device)
     try:
         model.load_state_dict(torch.load(MODEL_SAVE_PATH, map_location=device))
         model.eval()
@@ -97,8 +97,7 @@ def run_test(device: torch.device) -> None:
     allowed_guesses = load_words(ALLOWED_GUESSES_FILE)
     possible_solutions = load_words(POSSIBLE_SOLUTIONS_FILE)
 
-    input_size = 312
-    model = HeuristicScoringModel(input_size).to(device)
+    model = WordleEmbeddingModel(letter_embedding_dim=8, mlp_hidden_dim=256).to(device)
     model.load_state_dict(torch.load(MODEL_SAVE_PATH, map_location=device))
     model.eval()
     print("[INFO] Loaded model for testing.")
@@ -132,7 +131,7 @@ def run_test(device: torch.device) -> None:
 
 # --- Main Entry ---
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Wordle Solver using ML")
+    parser = argparse.ArgumentParser(description="Wordle Solver using ML (Embedding-based Model)")
     parser.add_argument(
         "--mode", type=str, choices=["train", "play", "test"], default="train",
         help="Mode to run: train, play, or test."
