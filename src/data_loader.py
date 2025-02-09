@@ -1,4 +1,4 @@
-# src/data_loader.py
+# data_loader.py
 
 import random
 from typing import List, Tuple
@@ -7,7 +7,8 @@ from torch.utils.data import Dataset
 import torch
 import os
 from config import FAST_MODE
-# Use the new embedding encoding functions:
+import pickle  # <-- Import pickle for caching
+
 from embedding_encoding import (
     encode_word_indices,
     encode_constraints_indices,
@@ -15,14 +16,12 @@ from embedding_encoding import (
     encode_absent_set,
 )
 
-
 def load_words(file_path: str) -> List[str]:
     with open(file_path, 'r') as f:
         words = [line.strip().upper() for line in f if len(line.strip()) == 5 and line.strip().isalpha()]
     if not FAST_MODE:
         print(f"[INFO] Loaded {len(words)} words from {file_path}.")
     return words
-
 
 def get_feedback(guess: str, target: str) -> List[str]:
     feedback = ['B'] * 5
@@ -39,7 +38,6 @@ def get_feedback(guess: str, target: str) -> List[str]:
             target_letters[target_letters.index(guess[i])] = None
 
     return feedback
-
 
 def generate_word_files(words_file: str, guesses_file: str, solutions_file: str):
     if not FAST_MODE:
@@ -73,7 +71,6 @@ def generate_word_files(words_file: str, guesses_file: str, solutions_file: str)
         if not FAST_MODE:
             print("[INFO] Allowed guesses and possible solutions files already exist. Skipping generation.")
 
-
 def generate_training_data(possible_solutions: List[str], allowed_guesses: List[str], num_games: int = 2000):
     if not FAST_MODE:
         print("[INFO] Generating synthetic training games...")
@@ -94,7 +91,7 @@ def generate_training_data(possible_solutions: List[str], allowed_guesses: List[
         used_guesses.add(guess)
         feedback = get_feedback(guess, target)
         if not FAST_MODE:
-            print(f"[INFO] Game {game_idx + 1}: First Guess = {guess}, Feedback = {feedback}")
+            print(f"[INFO] Game {game_idx+1}: First Guess = {guess}, Feedback = {feedback}")
 
         constraints.update_constraints(guess, feedback)
         current_possible = constraints.filter_words(current_possible)
@@ -107,7 +104,6 @@ def generate_training_data(possible_solutions: List[str], allowed_guesses: List[
 
         # **Subsequent Attempts: 2 to 5**
         for attempt in range(1, 5):
-            # For the first three attempts, restrict new letters.
             if attempt < 3:
                 valid_guesses = []
                 for word in allowed_guesses:
@@ -138,6 +134,25 @@ def generate_training_data(possible_solutions: List[str], allowed_guesses: List[
         print(f"[INFO] Synthetic training data generation complete. Total samples: {len(data)}")
     return data
 
+def load_or_generate_training_data(possible_solutions: List[str], allowed_guesses: List[str],
+                                   num_games: int = 2000, cache_file: str = "training_data.pkl"):
+    """
+    Checks if a cached training data file exists.
+    If yes, loads the training samples from disk.
+    Otherwise, generates the training data and caches it.
+    """
+    if os.path.exists(cache_file):
+        with open(cache_file, 'rb') as f:
+            training_data = pickle.load(f)
+        print(f"[INFO] Loaded cached training data from {cache_file}.")
+        return training_data
+    else:
+        print(f"[INFO] Cache file {cache_file} not found. Generating training data...")
+        training_data = generate_training_data(possible_solutions, allowed_guesses, num_games)
+        with open(cache_file, 'wb') as f:
+            pickle.dump(training_data, f)
+        print(f"[INFO] Training data generated and cached in {cache_file}.")
+        return training_data
 
 class WordleDataset(Dataset):
     def __init__(self, data: List[Tuple[WordleConstraints, str, int]]):
@@ -154,7 +169,6 @@ class WordleDataset(Dataset):
         self.samples = []
         for constraints, word, label in data:
             guess_indices = encode_word_indices(word)  # shape: (5,)
-            # Assume constraints.correct_positions is a list of length 5 (unknown positions are '' or None)
             constraint_indices = encode_constraints_indices(constraints.correct_positions)
             presence = encode_presence_set(constraints.present_letters)
             absent = encode_absent_set(constraints.absent_letters)
@@ -166,11 +180,10 @@ class WordleDataset(Dataset):
     def __getitem__(self, idx):
         return self.samples[idx]
 
-
 def collate_fn(batch):
     """
     Custom collate function to handle batching of samples with variable-length presence and absent lists.
-
+    
     Returns:
       - guess_indices: Tensor of shape (batch_size, 5)
       - constraint_indices: Tensor of shape (batch_size, 5)

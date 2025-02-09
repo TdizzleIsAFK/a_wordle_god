@@ -1,36 +1,44 @@
 """
 Main entry point for the Wordle Solver project.
 Handles training, gameplay, and testing modes.
-Now using the embedding‐based model.
+Now using the embedding-based model and a custom collate function.
 """
 
 import argparse
 import os
-from copy import deepcopy
-
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-import matplotlib.pyplot as plt
 from collections import Counter
 
 # Local module imports
-from data_loader import load_words, generate_training_data, WordleDataset, generate_word_files, get_feedback
+from data_loader import (
+    load_words,
+    generate_training_data,
+    WordleDataset,
+    generate_word_files,
+    get_feedback,
+    collate_fn,  # Import the custom collate function.
+)
 from embedding_model import WordleEmbeddingModel
 from train import train_model, evaluate_model
 from gameplay import play_wordle
 from config import FAST_MODE
-
 
 # --- Configuration ---
 DATA_DIR = os.path.join("..", "data")
 ALLOWED_GUESSES_FILE = os.path.join(DATA_DIR, "allowed_guesses.txt")
 POSSIBLE_SOLUTIONS_FILE = os.path.join(DATA_DIR, "possible_solutions.txt")
 WORDS_FILE = os.path.join(DATA_DIR, "words.txt")
-MODEL_SAVE_PATH = "model.pth"  # You might rename this file if desired.
+MODEL_SAVE_PATH = "model.pth"  # You may want to change the extension/name if needed.
+
+# Global variables for multiprocessing workers.
+GLOBAL_MODEL = None
+GLOBAL_DEVICE = None
+GLOBAL_ALLOWED_GUESSES = None
+GLOBAL_POSSIBLE_SOLUTIONS = None
 
 
-# --- Mode-specific functions ---
 def run_train(device: torch.device, args: argparse.Namespace) -> None:
     print("[INFO] Generating word files if necessary...")
     generate_word_files(WORDS_FILE, ALLOWED_GUESSES_FILE, POSSIBLE_SOLUTIONS_FILE)
@@ -44,14 +52,20 @@ def run_train(device: torch.device, args: argparse.Namespace) -> None:
     print(f"[INFO] Generated {len(training_data)} training samples.")
 
     dataset = WordleDataset(training_data)
-    dataloader = DataLoader(dataset, batch_size=1024, shuffle=True, num_workers=4, pin_memory=True)
+    dataloader = DataLoader(
+        dataset,
+        batch_size=1024,
+        shuffle=True,
+        num_workers=4,
+        pin_memory=True,
+        collate_fn=collate_fn,  # Use custom collate_fn to handle variable-length lists.
+    )
 
     # Initialize the embedding-based model.
-    # Adjust letter_embedding_dim and mlp_hidden_dim as needed.
     model = WordleEmbeddingModel(letter_embedding_dim=8, mlp_hidden_dim=256).to(device)
     criterion = torch.nn.MSELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-    scaler = torch.cuda.amp.GradScaler()
+    scaler = torch.amp.GradScaler()
 
     print("[INFO] Starting training...")
     train_model(model, dataloader, criterion, optimizer, device, scaler, args.epochs)
@@ -89,6 +103,34 @@ def run_play(device: torch.device, args: argparse.Namespace) -> None:
     print(f"[INFO] Solved '{target_word}' in {attempts_taken} attempts.")
 
 
+# --- Multiprocessing Helpers for Parallel Test Mode ---
+
+def init_worker(model_state_path, device_str, allowed, possible):
+    """
+    Initializer for each worker process.
+    Loads the model and sets the global variables for allowed guesses and possible solutions.
+    """
+    global GLOBAL_MODEL, GLOBAL_DEVICE, GLOBAL_ALLOWED_GUESSES, GLOBAL_POSSIBLE_SOLUTIONS
+    import torch  # Local import for worker processes
+    from embedding_model import WordleEmbeddingModel
+    GLOBAL_DEVICE = torch.device(device_str)
+    GLOBAL_MODEL = WordleEmbeddingModel(letter_embedding_dim=8, mlp_hidden_dim=256).to(GLOBAL_DEVICE)
+    GLOBAL_MODEL.load_state_dict(torch.load(model_state_path, map_location=GLOBAL_DEVICE))
+    GLOBAL_MODEL.eval()
+    GLOBAL_ALLOWED_GUESSES = allowed
+    GLOBAL_POSSIBLE_SOLUTIONS = possible
+
+
+def simulate_game(target_word):
+    """
+    Worker function that simulates a single game using the globally initialized model and data.
+    Returns a tuple (target_word, attempts).
+    """
+    from gameplay import play_wordle  # Local import to ensure module availability in worker
+    attempts = play_wordle(GLOBAL_MODEL, target_word, GLOBAL_ALLOWED_GUESSES, GLOBAL_POSSIBLE_SOLUTIONS, GLOBAL_DEVICE, verbose=False)
+    return (target_word, attempts)
+
+
 def run_test(device: torch.device) -> None:
     if not os.path.exists(MODEL_SAVE_PATH):
         print(f"[ERROR] Model file '{MODEL_SAVE_PATH}' not found. Train the model first using --mode train.")
@@ -97,20 +139,25 @@ def run_test(device: torch.device) -> None:
     allowed_guesses = load_words(ALLOWED_GUESSES_FILE)
     possible_solutions = load_words(POSSIBLE_SOLUTIONS_FILE)
 
-    model = WordleEmbeddingModel(letter_embedding_dim=8, mlp_hidden_dim=256).to(device)
-    model.load_state_dict(torch.load(MODEL_SAVE_PATH, map_location=device))
-    model.eval()
-    print("[INFO] Loaded model for testing.")
+    print("[INFO] Starting parallel testing over all possible solutions...")
+    total_words = len(possible_solutions)
+
+    # Use multiprocessing to parallelize simulation of games.
+    from multiprocessing import Pool, cpu_count
+    num_workers = cpu_count()  # Or choose a fixed number if desired.
+    with Pool(
+        processes=num_workers,
+        initializer=init_worker,
+        initargs=(MODEL_SAVE_PATH, device.type, allowed_guesses, possible_solutions)
+    ) as pool:
+        # Use imap for lazy evaluation with a progress bar.
+        results = list(tqdm(pool.imap(simulate_game, possible_solutions), total=total_words, desc="Testing Progress"))
 
     total_attempts = 0
     total_solved = 0
-    total_words = len(possible_solutions)
     attempts_list = []
 
-    print("[INFO] Testing over all possible solutions...")
-    for target_word in tqdm(possible_solutions, desc="Testing Progress"):
-        attempts = play_wordle(model, target_word, allowed_guesses, possible_solutions, device, verbose=False)
-        # If solved in 6 attempts or less, record; else mark as failure (7)
+    for target_word, attempts in results:
         if attempts <= 6:
             total_solved += 1
             total_attempts += attempts
@@ -152,4 +199,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    # Set the multiprocessing start method to "spawn" to work with CUDA.
+    import multiprocessing
+    multiprocessing.set_start_method("spawn", force=True)
     main()
