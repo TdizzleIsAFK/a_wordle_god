@@ -3,11 +3,18 @@
 import random
 from typing import List, Tuple
 from constraints import WordleConstraints
-from encoding import encode_input
 from torch.utils.data import Dataset
 import torch
 import os
 from config import FAST_MODE
+# Use the new embedding encoding functions:
+from embedding_encoding import (
+    encode_word_indices,
+    encode_constraints_indices,
+    encode_presence_set,
+    encode_absent_set,
+)
+
 
 def load_words(file_path: str) -> List[str]:
     with open(file_path, 'r') as f:
@@ -15,6 +22,7 @@ def load_words(file_path: str) -> List[str]:
     if not FAST_MODE:
         print(f"[INFO] Loaded {len(words)} words from {file_path}.")
     return words
+
 
 def get_feedback(guess: str, target: str) -> List[str]:
     feedback = ['B'] * 5
@@ -31,6 +39,7 @@ def get_feedback(guess: str, target: str) -> List[str]:
             target_letters[target_letters.index(guess[i])] = None
 
     return feedback
+
 
 def generate_word_files(words_file: str, guesses_file: str, solutions_file: str):
     if not FAST_MODE:
@@ -64,7 +73,6 @@ def generate_word_files(words_file: str, guesses_file: str, solutions_file: str)
         if not FAST_MODE:
             print("[INFO] Allowed guesses and possible solutions files already exist. Skipping generation.")
 
-# src/data_loader.py
 
 def generate_training_data(possible_solutions: List[str], allowed_guesses: List[str], num_games: int = 2000):
     if not FAST_MODE:
@@ -86,7 +94,7 @@ def generate_training_data(possible_solutions: List[str], allowed_guesses: List[
         used_guesses.add(guess)
         feedback = get_feedback(guess, target)
         if not FAST_MODE:
-            print(f"[INFO] Game {game_idx+1}: First Guess = {guess}, Feedback = {feedback}")
+            print(f"[INFO] Game {game_idx + 1}: First Guess = {guess}, Feedback = {feedback}")
 
         constraints.update_constraints(guess, feedback)
         current_possible = constraints.filter_words(current_possible)
@@ -99,20 +107,16 @@ def generate_training_data(possible_solutions: List[str], allowed_guesses: List[
 
         # **Subsequent Attempts: 2 to 5**
         for attempt in range(1, 5):
-            # Apply the new rule: For the first three attempts (including first), restrict new letters
+            # For the first three attempts, restrict new letters.
             if attempt < 3:
-                # Identify new letters that haven't been used yet
                 valid_guesses = []
                 for word in allowed_guesses:
                     letters = set(word)
                     new_letters = letters - used_letters
-                    # Ensure that no new letter is repeated more than once
                     if all(word.count(letter) <= 1 for letter in new_letters):
-                        # Additionally, you can exclude "CRANE" if it's already used
                         if word not in used_guesses:
                             valid_guesses.append(word)
             else:
-                # After attempt #3, allow any guesses excluding used guesses
                 valid_guesses = [w for w in allowed_guesses if w not in used_guesses]
 
             if not valid_guesses:
@@ -134,20 +138,49 @@ def generate_training_data(possible_solutions: List[str], allowed_guesses: List[
         print(f"[INFO] Synthetic training data generation complete. Total samples: {len(data)}")
     return data
 
+
 class WordleDataset(Dataset):
     def __init__(self, data: List[Tuple[WordleConstraints, str, int]]):
-        self.inputs = []
-        self.labels = []
+        """
+        Each sample is now a tuple:
+          (guess_indices, constraint_indices, presence, absent, label)
+        where:
+            - guess_indices: Tensor of shape (5,) for the candidate guess word (0-25).
+            - constraint_indices: Tensor of shape (5,) for known correct letters (0-25, with 26 for unknown).
+            - presence: List of indices for letters known to be present.
+            - absent: List of indices for letters known to be absent.
+            - label: The numerical label (number of possible solutions left).
+        """
+        self.samples = []
         for constraints, word, label in data:
-            input_tensor = encode_input(constraints, word)
-            # We trust our data now, no debug print necessary.
-            self.inputs.append(input_tensor)
-            self.labels.append(label)
-        self.inputs = torch.stack(self.inputs)  # Shape: (N, 312)
-        self.labels = torch.tensor(self.labels, dtype=torch.float32).unsqueeze(1)
+            guess_indices = encode_word_indices(word)  # shape: (5,)
+            # Assume constraints.correct_positions is a list of length 5 (unknown positions are '' or None)
+            constraint_indices = encode_constraints_indices(constraints.correct_positions)
+            presence = encode_presence_set(constraints.present_letters)
+            absent = encode_absent_set(constraints.absent_letters)
+            self.samples.append((guess_indices, constraint_indices, presence, absent, label))
 
     def __len__(self):
-        return len(self.inputs)
+        return len(self.samples)
 
     def __getitem__(self, idx):
-        return self.inputs[idx], self.labels[idx]
+        return self.samples[idx]
+
+
+def collate_fn(batch):
+    """
+    Custom collate function to handle batching of samples with variable-length presence and absent lists.
+
+    Returns:
+      - guess_indices: Tensor of shape (batch_size, 5)
+      - constraint_indices: Tensor of shape (batch_size, 5)
+      - presence_list: List of length batch_size, each element is a list of indices
+      - absent_list: List of length batch_size, each element is a list of indices
+      - labels: Tensor of shape (batch_size, 1)
+    """
+    guess_indices = torch.stack([item[0] for item in batch], dim=0)
+    constraint_indices = torch.stack([item[1] for item in batch], dim=0)
+    labels = torch.tensor([item[4] for item in batch], dtype=torch.float32).unsqueeze(1)
+    presence_list = [item[2] for item in batch]
+    absent_list = [item[3] for item in batch]
+    return guess_indices, constraint_indices, presence_list, absent_list, labels
