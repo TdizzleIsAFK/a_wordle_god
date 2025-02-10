@@ -24,41 +24,31 @@ class ExampleDataset(Dataset):
     def __getitem__(self, idx: int):
         return self.data[idx], self.labels[idx]
 
-def train_model(model, dataloader: DataLoader,
-                criterion: nn.Module, optimizer: optim.Optimizer, device: torch.device,
-                scaler: torch.amp.GradScaler, num_epochs: int = 20,
-                scheduler: optim.lr_scheduler._LRScheduler = None) -> None:
+def train_model(model, dataloader, criterion, optimizer, device, scaler, num_epochs: int = 20, start_epoch: int = 0, scheduler: any = None) -> None:
     """
-    Train the model for a given number of epochs.
-    Supports both:
-      - Old format: (inputs, labels)
-      - New format: (guess_indices, constraint_indices, presence_list, absent_list, labels)
+    Train the model from start_epoch to num_epochs.
     """
     model.train()
-    for epoch in range(num_epochs):
+    for epoch in range(start_epoch, num_epochs):
         epoch_loss = 0.0
         for batch in dataloader:
             optimizer.zero_grad()
             if isinstance(batch, (list, tuple)) and len(batch) == 2:
-                # Old format: inputs, labels
                 inputs, labels = batch
                 inputs = inputs.to(device, non_blocking=True)
                 labels = labels.to(device, non_blocking=True)
                 with torch.amp.autocast(device_type=device.type):
                     outputs = model(inputs)
             elif isinstance(batch, (list, tuple)) and len(batch) == 5:
-                # New format: guess_indices, constraint_indices, presence_list, absent_list, labels
                 guess_indices, constraint_indices, presence_list, absent_list, labels = batch
                 guess_indices = guess_indices.to(device, non_blocking=True)
                 constraint_indices = constraint_indices.to(device, non_blocking=True)
-                # presence_list and absent_list remain as lists; the model handles them internally.
                 labels = labels.to(device, non_blocking=True)
                 with torch.amp.autocast(device_type=device.type):
                     outputs = model(guess_indices, constraint_indices, presence_list, absent_list)
             else:
                 raise ValueError("Unexpected batch format from dataloader.")
 
-            # Convert outputs to float32 to match labels for loss computation.
             loss = criterion(outputs.float(), labels)
             scaler.scale(loss).backward()
             scaler.step(optimizer)

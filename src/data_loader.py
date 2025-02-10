@@ -16,12 +16,14 @@ from embedding_encoding import (
     encode_absent_set,
 )
 
+
 def load_words(file_path: str) -> List[str]:
     with open(file_path, 'r') as f:
         words = [line.strip().upper() for line in f if len(line.strip()) == 5 and line.strip().isalpha()]
     if not FAST_MODE:
         print(f"[INFO] Loaded {len(words)} words from {file_path}.")
     return words
+
 
 def get_feedback(guess: str, target: str) -> List[str]:
     feedback = ['B'] * 5
@@ -38,6 +40,7 @@ def get_feedback(guess: str, target: str) -> List[str]:
             target_letters[target_letters.index(guess[i])] = None
 
     return feedback
+
 
 def generate_word_files(words_file: str, guesses_file: str, solutions_file: str):
     if not FAST_MODE:
@@ -62,14 +65,16 @@ def generate_word_files(words_file: str, guesses_file: str, solutions_file: str)
         if not FAST_MODE:
             print(f"[INFO] {len(all_words)} words written to {guesses_file}.")
 
-        subset_size = min(2500, len(all_words))
+        subset_size = len(all_words)  # Use the entire vocabulary as possible solutions.
         with open(solutions_file, 'w') as solutions:
             solutions.write('\n'.join(all_words[:subset_size]))
         if not FAST_MODE:
             print(f"[INFO] {subset_size} words written to {solutions_file}.")
+
     else:
         if not FAST_MODE:
             print("[INFO] Allowed guesses and possible solutions files already exist. Skipping generation.")
+
 
 def generate_training_data(possible_solutions: List[str], allowed_guesses: List[str], num_games: int = 2000):
     if not FAST_MODE:
@@ -91,7 +96,7 @@ def generate_training_data(possible_solutions: List[str], allowed_guesses: List[
         used_guesses.add(guess)
         feedback = get_feedback(guess, target)
         if not FAST_MODE:
-            print(f"[INFO] Game {game_idx+1}: First Guess = {guess}, Feedback = {feedback}")
+            print(f"[INFO] Game {game_idx + 1}: First Guess = {guess}, Feedback = {feedback}")
 
         constraints.update_constraints(guess, feedback)
         current_possible = constraints.filter_words(current_possible)
@@ -134,6 +139,7 @@ def generate_training_data(possible_solutions: List[str], allowed_guesses: List[
         print(f"[INFO] Synthetic training data generation complete. Total samples: {len(data)}")
     return data
 
+
 def load_or_generate_training_data(possible_solutions: List[str], allowed_guesses: List[str],
                                    num_games: int = 2000, cache_file: str = "training_data.pkl"):
     """
@@ -153,6 +159,7 @@ def load_or_generate_training_data(possible_solutions: List[str], allowed_guesse
             pickle.dump(training_data, f)
         print(f"[INFO] Training data generated and cached in {cache_file}.")
         return training_data
+
 
 class WordleDataset(Dataset):
     def __init__(self, data: List[Tuple[WordleConstraints, str, int]]):
@@ -180,10 +187,11 @@ class WordleDataset(Dataset):
     def __getitem__(self, idx):
         return self.samples[idx]
 
+
 def collate_fn(batch):
     """
     Custom collate function to handle batching of samples with variable-length presence and absent lists.
-    
+
     Returns:
       - guess_indices: Tensor of shape (batch_size, 5)
       - constraint_indices: Tensor of shape (batch_size, 5)
